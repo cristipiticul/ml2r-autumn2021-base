@@ -1,10 +1,20 @@
-#!/usr/bin/env python3
+# Uses DQN: a Deep Neural Network tries to approximate the Q-Values of each (state, action) pair
+# The network has: 
+#   inputs = current state (2 matrixes, flattened), 
+#   outputs = for each action, a number that tells how good the action is when taken from input state
+# We used a simple neural network with 3 linear layers
+# To train the system, we start with a random initial state (using random_state_generator):
+#   Number of boxes: random number between 1-100
+#   Box distribution: uniform between [1,10] x [1,10]
+# The training process is very long, so we save intermediary models every 100 episodes 
+#  
 # Inspired from https://pytorch.org/tutorials/intermediate/reinforcement_q_learning.html
 # conda install -c conda-forge gym 
 # conda install pytorch torchvision torchaudio cpuonly -c pytorch
 
 import sys
 import gym
+import time
 import math
 import random
 import numpy as np
@@ -43,7 +53,9 @@ class ReplayMemory(object):
 
     def push(self, *args):
         """Save a transition"""
-        self.memory.append(Transition(*args))
+        transition = Transition(*args)
+        # if transition.reward >= 0 or random.random() < 0.01:
+        self.memory.append(transition)
 
     def sample(self, batch_size):
         return random.sample(self.memory, batch_size)
@@ -74,22 +86,22 @@ class DQN(nn.Module):
 
 env.reset()
 
-ATCH_SIZE = 128
 GAMMA = 0.999
 EPS_START = 0.9
-EPS_END = 0.05
+EPS_END = 0.1
 EPS_DECAY = 20000
-TARGET_UPDATE = 10
+TARGET_UPDATE = 100
 
 INPUTS = 200
 ACTIONS = 101
 policy_net = DQN(INPUTS, ACTIONS).to(device)
 target_net = DQN(INPUTS, ACTIONS).to(device)
+# policy_net.load_state_dict(torch.load('./policy_net_13200.pytorch_model'))
 target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 
-optimizer = optim.Adam(policy_net.parameters())
-memory = ReplayMemory(100000)
+optimizer = optim.RMSprop(policy_net.parameters())
+memory = ReplayMemory(10000)
 
 
 steps_done = 0
@@ -113,8 +125,10 @@ def select_action(state):
 
 episode_durations = []
 
-BATCH_SIZE = 256
+BATCH_SIZE = 128
+episode_loss = []
 def optimize_model():
+    global episode_loss
     if len(memory) < BATCH_SIZE:
         return
     policy_net.train()
@@ -152,6 +166,7 @@ def optimize_model():
     # Compute Huber loss
     criterion = nn.SmoothL1Loss()
     loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
+    episode_loss.append(loss.item())
 
     # Optimize the model
     optimizer.zero_grad()
@@ -161,11 +176,19 @@ def optimize_model():
     optimizer.step()
 
 def main():
-    num_episodes = 5000
+    global episode_loss
+    global steps_done
+    num_episodes = 50000
     for i_episode in range(num_episodes):
+        if i_episode % 500 == 0:
+            steps_done = 0
+        episode_loss = []
         # Initialize the environment and state
-        n_boxes = random.randint(1, 100)
-        env.reset(random_state_generator((10, 10),n_boxes,1,10,1,10))
+        if random.random() < 0.5:
+            n_boxes = i_episode // 500 + 1
+        else:
+            n_boxes = random.randint(1, i_episode // 500 + 1)
+        env.reset(random_state_generator((10, 10),n_boxes,1,10,1,10, seed=time.time()))
         state = torch.from_numpy(env._next_observation().astype(np.float32)).unsqueeze(0)
         for t in count():
             # Select and perform an action
@@ -195,13 +218,13 @@ def main():
                     torch.save(target_net.state_dict(), './target_net_{}.pytorch_model'.format(i_episode))
                 episode_durations.append(t + 1)
                 break
-        print('Episode: ', i_episode, '; Boxes: ', n_boxes,  '; Episode duration: ', episode_durations[-1], '; #bins: ', len(env.bpState.bins), '; Eps: ', EPS_END + (EPS_START - EPS_END) * math.exp(-1. * steps_done / EPS_DECAY))
+        print('Episode: ', i_episode, '; Boxes: ', n_boxes,  '; Episode duration: ', episode_durations[-1], '; #bins: ', len(env.bpState.bins), '; Eps: ', EPS_END + (EPS_START - EPS_END) * math.exp(-1. * steps_done / EPS_DECAY), '; Loss: ', np.mean(episode_loss))
         # Update the target network, copying all weights and biases in DQN
-        if i_episode % TARGET_UPDATE == 0:
-            target_net.load_state_dict(policy_net.state_dict())
 
-    torch.save(policy_net.state_dict(), './policy_net.pytorch_model')
-    torch.save(target_net.state_dict(), './target_net.pytorch_model')
+    if i_episode % TARGET_UPDATE == 0:
+        target_net.load_state_dict(policy_net.state_dict())
+    torch.save(policy_net.state_dict(), './policy_net_rms.pytorch_model')
+    torch.save(target_net.state_dict(), './target_net_rms.pytorch_model')
 
     print('Complete')
     env.render()
